@@ -1,0 +1,3 @@
+[submodule "UGen/decoder/diff-gaussian-rasterization"]
+	path = UGen/decoder/diff-gaussian-rasterization
+	url = https://github.com/graphdeco-inria/diff-gaussian-rasterization.git
