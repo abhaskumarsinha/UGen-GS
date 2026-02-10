@@ -1,115 +1,96 @@
-from keras import layers, initializers
-import numpy as np
+import keras
+from keras import layers, ops, initializers
+import math
 
 
-def infer_sh_order(sh_len: int) -> int:
+class GaussianLayer(layers.Layer):
     """
-    Infer SH order l from flattened SH length.
-    sh_len = 3 * (l + 1)^2
-    """
-    l = int(np.sqrt(sh_len / 3) - 1)
-    assert 3 * (l + 1) ** 2 == sh_len, \
-        f"Invalid SH length: {sh_len}"
-    return l
-
-
-class GaussianParameterLayer(layers.Layer):
-    """
-    Keras layer that owns Gaussian parameters and optionally
-    initializes them from JSON-like dictionaries.
+    Convention-free Gaussian container (Keras 3 safe).
     """
 
-    def __init__(
-        self,
-        gaussians_json: list[dict],
-        trainable: bool = True,
-        name="gaussian_parameters",
-        **kwargs,
-    ):
-        super().__init__(name=name, trainable=trainable, **kwargs)
+    def __init__(self, gaussians, sh_degree=None, trainable=True, **kwargs):
+        super().__init__(**kwargs)
 
-        assert len(gaussians_json) > 0, "Empty gaussian list"
+        self.N = len(gaussians)
 
-        self.N = len(gaussians_json)
+        positions = ops.array([g["position"] for g in gaussians], dtype="float32")
+        scales    = ops.array([g["scale"]    for g in gaussians], dtype="float32")
+        alphas    = ops.array([g["alpha"]    for g in gaussians], dtype="float32")[:, None]
+        quats     = ops.array([g["quat"]     for g in gaussians], dtype="float32")
+        sh_coeffs = ops.array([g["sh"]       for g in gaussians], dtype="float32")
 
-        # -------- Parse JSONs --------
-        means = []
-        scales = []
-        alphas = []
-        quats = []
-        sh_coeffs = []
-
-        for g in gaussians_json:
-            means.append(g["position"])
-            scales.append(g["scale"])
-            alphas.append([g["alpha"]])
-            quats.append(g["quat"])
-            sh_coeffs.append(g["sh"])
-
-        self.means_init = np.asarray(means, dtype=np.float32)      # (N, 3)
-        self.scales_init = np.asarray(scales, dtype=np.float32)    # (N, 3)
-        self.alphas_init = np.asarray(alphas, dtype=np.float32)    # (N, 1)
-        self.quats_init = np.asarray(quats, dtype=np.float32)      # (N, 4)
-        self.sh_init = np.asarray(sh_coeffs, dtype=np.float32)     # (N, sh_l)
-
-        self.sh_l = self.sh_init.shape[1]
-        self.sh_order = infer_sh_order(self.sh_l)
-
-        self.means = self.add_weight(
-            name="means",
+        # ---- Parameters ----
+        self.position = self.add_weight(
             shape=(self.N, 3),
-            initializer=initializers.Constant(self.means_init),
-            trainable=True,
+            initializer=initializers.Constant(positions),
+            trainable=trainable,
+            name="position",
         )
 
-        self.scales = self.add_weight(
-            name="scales",
+        self.scale = self.add_weight(
             shape=(self.N, 3),
-            initializer=initializers.Constant(self.scales_init),
-            trainable=True,
+            initializer=initializers.Constant(scales),
+            trainable=trainable,
+            name="scale",
         )
 
-        self.alphas = self.add_weight(
-            name="alphas",
+        self.alpha = self.add_weight(
             shape=(self.N, 1),
-            initializer=initializers.Constant(self.alphas_init),
-            trainable=True,
+            initializer=initializers.Constant(alphas),
+            trainable=trainable,
+            name="alpha",
         )
 
-        self.quats = self.add_weight(
-            name="quaternions",
+        self.quat = self.add_weight(
             shape=(self.N, 4),
-            initializer=initializers.Constant(self.quats_init),
-            trainable=True,
+            initializer=initializers.Constant(quats),
+            trainable=trainable,
+            name="quat",
         )
 
         self.sh = self.add_weight(
-            name="sh_coeffs",
-            shape=(self.N, self.sh_l),
-            initializer=initializers.Constant(self.sh_init),
-            trainable=True,
+            shape=(self.N, sh_coeffs.shape[-1]),
+            initializer=initializers.Constant(sh_coeffs),
+            trainable=trainable,
+            name="sh",
         )
+
+        # ---- SH degree ----
+        if sh_degree is None:
+            self.sh_degree = self._infer_sh_degree(self.sh.shape[-1])
+        else:
+            self.sh_degree = sh_degree
+
+
+    @staticmethod
+    def _infer_sh_degree(num_coeffs):
+        """
+        Supports:
+          - scalar SH: (L+1)^2
+          - RGB SH: 3 * (L+1)^2
+        """
+        # RGB SH
+        if num_coeffs % 3 == 0:
+            base = num_coeffs // 3
+            L = int(math.sqrt(base) - 1)
+            if (L + 1) ** 2 == base:
+                return L
+
+        # Scalar SH
+        L = int(math.sqrt(num_coeffs) - 1)
+        if (L + 1) ** 2 == num_coeffs:
+            return L
+
+        raise ValueError(f"Invalid SH coefficient count: {num_coeffs}")
+
 
     def call(self, inputs=None):
-        """
-        Returns all Gaussian parameters.
-        This layer ignores inputs and acts as a parameter container.
-        """
         return {
-            "mean": self.means,        # (N, 3)
-            "scale": self.scales,      # (N, 3)
-            "alpha": self.alphas,      # (N, 1)
-            "quat": self.quats,        # (N, 4)
-            "sh": self.sh,             # (N, sh_l)
+            "position": keras.ops.convert_to_tensor(self.position),
+            "scale": keras.ops.convert_to_tensor(self.scale),
+            "alpha": keras.ops.convert_to_tensor(self.alpha),
+            "quat": keras.ops.convert_to_tensor(self.quat),
+            "sh": keras.ops.convert_to_tensor(self.sh),
+            "sh_degree": self.sh_degree,
+            "count": self.N,
         }
-
-    def get_config(self):
-        config = super().get_config()
-        config.update(
-            {
-                "N": self.N,
-                "sh_l": self.sh_l,
-                "sh_order": self.sh_order,
-            }
-        )
-        return config
