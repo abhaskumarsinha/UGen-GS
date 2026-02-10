@@ -154,7 +154,7 @@ class GaussianRasterizerDecoder(BaseRasterizer):
 
         shs = self.rgb_to_sh(
             gaussian["sh"],
-            gaussian["sh_degree"],
+            self.config.sh_degree,
         )
 
         rotations = self.quat_to_rot_matrix(
