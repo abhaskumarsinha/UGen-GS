@@ -20,19 +20,20 @@ class GaussianLayer(nn.Module):
         quats     = torch.as_tensor([g["quat"]     for g in gaussians], dtype=torch.float32)
         sh_coeffs = torch.as_tensor([g["sh"]       for g in gaussians], dtype=torch.float32)
 
-        # ---- Parameters ----
-        # Use nn.Parameter to allow (or disallow) gradient updates via requires_grad
+        # ---- Trainable Parameters ----
         self.position = nn.Parameter(positions, requires_grad=bool(trainable))
         self.scale    = nn.Parameter(scales,    requires_grad=bool(trainable))
         self.alpha    = nn.Parameter(alphas,    requires_grad=bool(trainable))
         self.quat     = nn.Parameter(quats,     requires_grad=bool(trainable))
+        self.sh       = nn.Parameter(sh_coeffs, requires_grad=bool(trainable))
 
-        # sh shape: (N, num_sh_coeffs)
-        self.sh = nn.Parameter(sh_coeffs, requires_grad=bool(trainable))
+        # ---- Non-trainable 2D means (required by rasterizer) ----
+        # Shape: (N, 2)
+        mean2D = torch.zeros(self.N, 2, dtype=torch.float32)
+        self.register_buffer("mean2D", mean2D)
 
         # ---- SH degree ----
         if sh_degree is None:
-            # infer from number of coeffs per-gaussian (last dim of sh)
             self.sh_degree = self._infer_sh_degree(self.sh.shape[-1])
         else:
             self.sh_degree = sh_degree
@@ -61,7 +62,6 @@ class GaussianLayer(nn.Module):
 
 
     def forward(self, inputs=None):
-        # Return same structure as original Keras .call
         return {
             "position": self.position,
             "scale": self.scale,
@@ -70,4 +70,5 @@ class GaussianLayer(nn.Module):
             "sh": self.sh,
             "sh_degree": self.sh_degree,
             "count": self.N,
+            "mean2D": self.mean2D,  # <- added here
         }
