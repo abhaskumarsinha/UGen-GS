@@ -156,6 +156,7 @@ class GaussianRasterizerDecoder(BaseRasterizer):
     
         # Gaussian parameters
         means3D = gaussian["position"].to(torch.float32)               # (N, 3)
+        means2D = gaussian["mean2D"].to(torch.float32)               # (N, 3)
         scales = (gaussian["scale"] * 0.001).to(torch.float32)         # (N, 3)
     
         # ---------- FIX 1: Opacity shape (N, 1) ----------
@@ -184,8 +185,6 @@ class GaussianRasterizerDecoder(BaseRasterizer):
         ).transpose(1, 2).to(torch.float32)                            # (N, 3, 3)
     
         # ---------- FIX 3: Add means2D tensor ----------
-        # Allocate a tensor that will be filled with 2D screen positions
-        means2D = torch.zeros((means3D.shape[0], 2), dtype=torch.float32, device=device)
     
         # Validate dimensions
         assert means3D.dim() == 2 and means3D.shape[1] == 3, f"means3D shape error: {means3D.shape}"
