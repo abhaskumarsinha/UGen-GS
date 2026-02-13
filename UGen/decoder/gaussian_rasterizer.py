@@ -118,31 +118,30 @@ class GaussianRasterizerDecoder(BaseRasterizer):
     # ---------------------------------------------------------
     # Render
     # ---------------------------------------------------------
-    
+        
     def render(self, cam, gaussian):
         # Clear CUDA cache to prevent memory fragmentation
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
-        
+    
         # Get device from gaussian data
         device = gaussian["position"].device
-        
+    
         # Ensure all camera parameters are on the same device and type
         qvec = cam["rotation_quaternion"].to(device).to(torch.float32)
         tvec = cam["translation"].to(device).to(torch.float32)
-        
+    
         # Camera matrix calculations
         R = self.quat_to_rot_matrix(qvec).transpose(0, 1)
         view_mat = self.getWorld2View2(R, tvec)
-        
+    
         w, h = cam["width"], cam["height"]
         fx, fy = cam["fx"], cam["fy"]
-        
-        # Ensure fov calculations are on the correct device
+    
         fovX = 2.0 * torch.atan(torch.tensor((w * 0.5) / fx, device=device))
         fovY = 2.0 * torch.atan(torch.tensor((h * 0.5) / fy, device=device))
-        
+    
         proj_mat = self.getProjectionMatrix(
             self.config.znear,
             self.config.zfar,
@@ -150,50 +149,60 @@ class GaussianRasterizerDecoder(BaseRasterizer):
             fovY,
             device,
         )
-        
+    
         world_view_transform = view_mat.t().to(torch.float32)
         full_proj_transform = (world_view_transform @ proj_mat.t()).to(torch.float32)
         camera_center = (-R.T @ tvec).to(torch.float32)
-        
-        # Gaussian parameters - ensure proper types
-        means3D = gaussian["position"].to(torch.float32)
-        scales = (gaussian["scale"] * 0.001).to(torch.float32)
-        opacities = gaussian["alpha"].squeeze(-1).clamp(0, 1).to(torch.float32)
-        
-        # Fix SH handling for degree 0
-        # For degree 0, we should have shape (N, 3)
+    
+        # Gaussian parameters
+        means3D = gaussian["position"].to(torch.float32)               # (N, 3)
+        scales = (gaussian["scale"] * 0.001).to(torch.float32)         # (N, 3)
+    
+        # ---------- FIX 1: Opacity shape (N, 1) ----------
+        # Remove squeeze; ensure shape is (N, 1)
+        opacities = gaussian["alpha"].clamp(0, 1).to(torch.float32)    # (N, 1)
+        if opacities.dim() == 1:
+            opacities = opacities.unsqueeze(-1)                        # (N) -> (N, 1)
+    
+        # ---------- FIX 2: SH tensor shape ----------
         if self.config.sh_degree == 0:
-            # Direct RGB values, no conversion needed
+            # For degree 0, SH coefficients are just RGB in the first band.
+            # Expected shape: (N, 1, 3)
             shs = gaussian["sh"].to(torch.float32)
-            # Ensure it's the right shape: (N, 3)
-            if len(shs.shape) == 1:
-                shs = shs.unsqueeze(0)
+            if shs.dim() == 2 and shs.shape[1] == 3:
+                shs = shs.unsqueeze(1)                                 # (N, 3) -> (N, 1, 3)
+            # If already (N, 1, 3), leave as is
         else:
+            # Convert RGB to SH coefficients; return shape (N, (deg+1)^2, 3)
             shs = self.rgb_to_sh(
                 gaussian["sh"].to(torch.float32),
-                gaussian["sh_degree"],
+                gaussian["sh_degree"],                                  # or self.config.sh_degree?
             ).to(torch.float32)
-        
+    
         rotations = self.quat_to_rot_matrix(
             gaussian["quat"].to(torch.float32)
-        ).transpose(1, 2).to(torch.float32)
-        
+        ).transpose(1, 2).to(torch.float32)                            # (N, 3, 3)
+    
+        # ---------- FIX 3: Add means2D tensor ----------
+        # Allocate a tensor that will be filled with 2D screen positions
+        means2D = torch.zeros((means3D.shape[0], 2), dtype=torch.float32, device=device)
+    
         # Validate dimensions
         assert means3D.dim() == 2 and means3D.shape[1] == 3, f"means3D shape error: {means3D.shape}"
         assert scales.dim() == 2 and scales.shape[1] == 3, f"scales shape error: {scales.shape}"
-        assert opacities.dim() == 1, f"opacities shape error: {opacities.shape}"
+        assert opacities.dim() == 2 and opacities.shape[1] == 1, f"opacities shape error: {opacities.shape}"
         assert rotations.dim() == 3 and rotations.shape[1:] == (3, 3), f"rotations shape error: {rotations.shape}"
-        
+        assert shs.dim() == 3 and shs.shape[2] == 3, f"shs shape error: {shs.shape} (should be (N, K, 3))"
+    
         # Raster settings
         tanfovx = math.tan(fovX.item() * 0.5)
         tanfovy = math.tan(fovY.item() * 0.5)
-        
+    
         H = int(h * 2) if self.config.double_resolution else int(h)
         W = int(w * 2) if self.config.double_resolution else int(w)
-        
-        # Create background tensor
+    
         bg = torch.tensor(self.background_color, dtype=torch.float32, device=device)
-        
+    
         raster_settings = GaussianRasterizationSettings(
             image_height=H,
             image_width=W,
@@ -208,17 +217,16 @@ class GaussianRasterizerDecoder(BaseRasterizer):
             prefiltered=False,
             debug=False,
         )
-        
-        # Sync before creating rasterizer
+    
         if torch.cuda.is_available():
             torch.cuda.synchronize()
-        
+    
         rasterizer = GaussianRasterizer(raster_settings)
-        
+    
         try:
             rendered_image, _ = rasterizer(
                 means3D=means3D,
-                means2D=None,
+                means2D=means2D,          # Now passed; will be filled with 2D positions
                 shs=shs,
                 colors_precomp=None,
                 opacities=opacities,
@@ -231,14 +239,17 @@ class GaussianRasterizerDecoder(BaseRasterizer):
             print(f"Shapes - means3D: {means3D.shape}, shs: {shs.shape}")
             print(f"Shapes - scales: {scales.shape}, rotations: {rotations.shape}")
             raise
-        
-        # Sync after rendering
+    
         if torch.cuda.is_available():
             torch.cuda.synchronize()
-        
+    
         rendered_image = rendered_image.clamp(0, 1)
-        
+    
         if self.config.output_format.upper() == "HWC":
             rendered_image = rendered_image.permute(1, 2, 0)
-        
+    
+        # Optional: after rendering, `means2D` contains the 2D screen coordinates.
+        # You could store them back into `gaussian` if needed, e.g.:
+        # gaussian["mean2D"] = means2D
+    
         return rendered_image
