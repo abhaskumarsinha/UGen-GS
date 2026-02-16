@@ -201,6 +201,9 @@ class QuadtreeDensifyEncoder(EncoderAlgorithms):
     # Required Base Method
     # ------------------------------------------------------------
 
-    def render(self):
-        _, final = self.run_pipeline()
-        return final
+    def render(self, return_gaussians=False):
+        gaussians, final = self.run_pipeline()
+        if return_gaussians:
+            return final, gaussians
+        else:
+            final
