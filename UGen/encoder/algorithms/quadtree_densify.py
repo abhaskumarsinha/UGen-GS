@@ -2,6 +2,8 @@ import numpy as np
 import cv2
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
+from UGen.encoder.algorithms.BaseAlgorithms import *
+
 
 
 # ------------------------------------------------------------
