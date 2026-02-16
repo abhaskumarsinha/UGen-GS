@@ -5,7 +5,7 @@ import os
 import heapq
 from typing import List, Tuple
 from dataclasses import dataclass
-from UGen.encoder.algorithms.BaseAlgorithms import *
+from UGen.encoder.algorithms.BaseAlgorithm import *
 
 
 # ------------------------------------------------------------
