@@ -206,4 +206,4 @@ class QuadtreeDensifyEncoder(EncoderAlgorithms):
         if return_gaussians:
             return final, gaussians
         else:
-            final
+            return final
