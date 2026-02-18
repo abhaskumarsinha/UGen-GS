@@ -638,14 +638,14 @@ class RecursiveQuadtreeDensifyEncoder(EncoderAlgorithms):
     
         colors = img[points_int[:, 1], points_int[:, 0]]
         weights = edges[points_int[:, 1], points_int[:, 0]]
-
-        gaussians = self.blur_gaussians_to_fill_gaps(gaussians, img,
-                                             self.config.blur_coverage_threshold,
-                                             self.config.blur_factor,
-                                             self.config.min_contribution_ratio)
     
         bbox = (0, w, 0, h)
         gaussians = self.build_quadtree(img, edges, points, colors, weights, bbox)
+
+        gaussians = self.blur_gaussians_to_fill_gaps(gaussians, img,
+                                     self.config.blur_coverage_threshold,
+                                     self.config.blur_factor,
+                                     self.config.min_contribution_ratio)
     
         # --- Gap filling ---
         gaussians = self.fill_gaps(gaussians, img, self.config.coverage_threshold, self.config.num_fill_points)
