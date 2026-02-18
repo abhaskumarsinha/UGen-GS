@@ -1,0 +1,296 @@
+import numpy as np
+import cv2
+from dataclasses import dataclass
+from typing import List, Tuple, Optional
+from UGen.encoder.algorithms.BaseAlgorithm import EncoderAlgorithms
+
+
+@dataclass
+class Gaussian2D:
+    mean: np.ndarray      # (2,) float, pixel coordinates (x, y)
+    cov: np.ndarray       # (2,2) float, covariance matrix
+    color: np.ndarray     # (3,) float in [0,1]
+    opacity: float = 1.0  # base opacity
+
+
+@dataclass
+class AlphaDensifyConfig:
+    target_size: Tuple[int, int] = (512, 512)
+    num_initial_points: int = 2000
+    error_threshold: float = 0.01          # stop when MSE < this
+    max_iterations: int = 10
+    points_per_iteration: int = 500        # new points added each iteration
+    max_points_per_leaf: int = 5
+    min_bbox_size: int = 8
+    cov_split_threshold: float = 5.0       # split Gaussians with max eigenvalue > this
+
+
+class AlphaQuadtreeDensifyEncoder(EncoderAlgorithms):
+    """
+    Adaptive Gaussian splatting with alpha compositing.
+    Uses quadtree decomposition of points sampled from edge and error maps.
+    """
+
+    def __init__(self, image_path: str, config: AlphaDensifyConfig):
+        self.image_path = image_path
+        self.config = config
+        self.gaussians: List[Gaussian2D] = []
+        self.rendered = None
+
+    # ------------------------------------------------------------
+    # Helper functions (adapted from original)
+    # ------------------------------------------------------------
+
+    def load_image(self, path: str, target_size: Optional[Tuple[int, int]] = None) -> np.ndarray:
+        img = cv2.imread(path)
+        if img is None:
+            raise FileNotFoundError(f"Image not found at {path}")
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        if target_size is not None:
+            img = cv2.resize(img, target_size, interpolation=cv2.INTER_AREA)
+        return img.astype(np.float32) / 255.0
+
+    def to_grayscale_with_edges(self, image: np.ndarray):
+        gray = cv2.cvtColor((image * 255).astype(np.uint8), cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
+        sobelx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+        sobely = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+        grad_mag = np.sqrt(sobelx**2 + sobely**2)
+        if grad_mag.max() > 0:
+            grad_mag /= grad_mag.max()
+        return gray, grad_mag
+
+    def select_important_points(self, importance_map: np.ndarray, num_points: int) -> np.ndarray:
+        """Sample pixel coordinates from a 2D importance map (treated as probability distribution)."""
+        h, w = importance_map.shape
+        flat = importance_map.flatten()
+        flat = flat + 1e-6          # avoid zero probabilities
+        probs = flat / flat.sum()
+        indices = np.random.choice(h * w, size=num_points, replace=False, p=probs)
+        ys, xs = np.divmod(indices, w)
+        return np.stack([xs, ys], axis=1).astype(np.float32)
+
+    def weighted_mean_cov(self, points: np.ndarray, weights: np.ndarray):
+        total_weight = weights.sum()
+        if total_weight == 0:
+            return np.zeros(2), np.eye(2) * 1e-6
+        mean = np.average(points, axis=0, weights=weights)
+        centered = points - mean
+        cov = np.dot(centered.T, centered * weights[:, None]) / total_weight
+        cov += np.eye(2) * 1e-6      # regularize
+        return mean, cov
+
+    def fit_gaussian_to_region(self, points: np.ndarray, colors: np.ndarray, weights: np.ndarray) -> Gaussian2D:
+        mean, cov = self.weighted_mean_cov(points, weights)
+        if len(colors) > 0:
+            avg_color = np.average(colors, axis=0, weights=weights)
+        else:
+            avg_color = np.array([0.5, 0.5, 0.5])
+        # Opacity can be set to 1.0 initially, or we could use the total weight to control blending.
+        # Here we keep opacity = 1.0 and rely on density falloff.
+        return Gaussian2D(mean=mean, cov=cov, color=avg_color, opacity=1.0)
+
+    def build_quadtree(self, image: np.ndarray, edge_map: np.ndarray,
+                       points: np.ndarray, colors: np.ndarray, weights: np.ndarray,
+                       bbox: Tuple[int, int, int, int]) -> List[Gaussian2D]:
+        """Recursively partition the bounding box and fit a Gaussian to each leaf."""
+        xmin, xmax, ymin, ymax = bbox
+        mask = (points[:, 0] >= xmin) & (points[:, 0] < xmax) & \
+               (points[:, 1] >= ymin) & (points[:, 1] < ymax)
+        pts_in = points[mask]
+        cols_in = colors[mask]
+        w_in = weights[mask]
+
+        # Leaf condition: few points or small cell size
+        if len(pts_in) <= self.config.max_points_per_leaf or \
+           (xmax - xmin <= self.config.min_bbox_size and ymax - ymin <= self.config.min_bbox_size):
+            if len(pts_in) > 0:
+                return [self.fit_gaussian_to_region(pts_in, cols_in, w_in)]
+            else:
+                return []
+
+        xmid = (xmin + xmax) // 2
+        ymid = (ymin + ymax) // 2
+        gaussians = []
+        gaussians.extend(self.build_quadtree(image, edge_map, points, colors, weights,
+                                             (xmin, xmid, ymin, ymid)))
+        gaussians.extend(self.build_quadtree(image, edge_map, points, colors, weights,
+                                             (xmid, xmax, ymin, ymid)))
+        gaussians.extend(self.build_quadtree(image, edge_map, points, colors, weights,
+                                             (xmin, xmid, ymid, ymax)))
+        gaussians.extend(self.build_quadtree(image, edge_map, points, colors, weights,
+                                             (xmid, xmax, ymid, ymax)))
+        return gaussians
+
+    def split_large_gaussians(self, gaussians: List[Gaussian2D]) -> List[Gaussian2D]:
+        """Split any Gaussian whose covariance is too large (eigenvalue > threshold)."""
+        refined = []
+        for g in gaussians:
+            try:
+                eigvals, eigvecs = np.linalg.eigh(g.cov)
+            except np.linalg.LinAlgError:
+                eigvals = [0, 0]
+            max_eig = max(eigvals)
+            if max_eig > self.config.cov_split_threshold:
+                direction = eigvecs[:, np.argmax(eigvals)]
+                shift = np.sqrt(max_eig) * direction
+                # Create two children with half the covariance
+                g1 = Gaussian2D(mean=g.mean + shift, cov=g.cov / 2,
+                                color=g.color, opacity=g.opacity)
+                g2 = Gaussian2D(mean=g.mean - shift, cov=g.cov / 2,
+                                color=g.color, opacity=g.opacity)
+                refined.extend([g1, g2])
+            else:
+                refined.append(g)
+        return refined
+
+    # ------------------------------------------------------------
+    # Alpha compositing render (front‑to‑back)
+    # ------------------------------------------------------------
+
+    def render_gaussians(self, gaussians: List[Gaussian2D], shape: Tuple[int, int]) -> np.ndarray:
+        """
+        Render Gaussians using alpha compositing.
+        For each Gaussian, compute density = exp(-0.5 * (x-μ)ᵀ Σ⁻¹ (x-μ)).
+        Contribution = color * (opacity * density), blended front‑to‑back.
+        """
+        h, w = shape
+        xs, ys = np.meshgrid(np.arange(w), np.arange(h))
+        coords = np.stack([xs, ys], axis=-1).astype(np.float32)   # (h, w, 2)
+
+        image = np.zeros((h, w, 3), dtype=np.float32)
+        alpha_acc = np.zeros((h, w), dtype=np.float32)            # accumulated opacity
+
+        # Sort Gaussians by something? Not strictly required, but we can sort by mean x or y for consistency.
+        # Here we just iterate in given order.
+        for g in gaussians:
+            # Compute Mahalanobis distance squared
+            delta = coords - g.mean
+            try:
+                inv_cov = np.linalg.inv(g.cov)
+            except np.linalg.LinAlgError:
+                inv_cov = np.linalg.pinv(g.cov)
+
+            # exponent = ∑_ij Δ_i (Σ⁻¹)_ij Δ_j
+            # Using einsum for efficiency
+            exponent = np.einsum('...i,ij,...j->...', delta, inv_cov, delta)   # (h, w)
+            density = np.exp(-0.5 * exponent)                                  # (h, w)
+
+            alpha = g.opacity * density
+            alpha = np.clip(alpha, 0, 1)                                       # per‑pixel alpha
+
+            # Front‑to‑back compositing
+            # new_color = old_color + (1 - old_alpha) * alpha * color
+            # new_alpha = old_alpha + (1 - old_alpha) * alpha
+            for c in range(3):
+                image[..., c] += (1.0 - alpha_acc) * alpha * g.color[c]
+            alpha_acc += (1.0 - alpha_acc) * alpha
+            # optional: clip alpha_acc to avoid numerical issues
+            alpha_acc = np.clip(alpha_acc, 0, 1)
+
+        return np.clip(image, 0, 1)
+
+    # ------------------------------------------------------------
+    # Error computation and point sampling
+    # ------------------------------------------------------------
+
+    def compute_error_map(self, original: np.ndarray, rendered: np.ndarray) -> np.ndarray:
+        """Per‑pixel squared error averaged over channels."""
+        return np.mean((original - rendered) ** 2, axis=-1)   # (h, w)
+
+    def sample_new_points_from_error(self, error_map: np.ndarray, num_points: int) -> np.ndarray:
+        """Sample pixel coordinates weighted by error map."""
+        h, w = error_map.shape
+        flat = error_map.flatten()
+        flat = flat + 1e-6          # avoid zero probabilities
+        probs = flat / flat.sum()
+        indices = np.random.choice(h * w, size=num_points, replace=False, p=probs)
+        ys, xs = np.divmod(indices, w)
+        return np.stack([xs, ys], axis=1).astype(np.float32)
+
+    # ------------------------------------------------------------
+    # Main iterative pipeline
+    # ------------------------------------------------------------
+
+    def run_pipeline(self) -> Tuple[List[Gaussian2D], np.ndarray]:
+        img = self.load_image(self.image_path, self.config.target_size)
+        h, w = img.shape[:2]
+
+        # Prepare edge map (importance for initial sampling)
+        _, edges = self.to_grayscale_with_edges(img)
+
+        # Initial points from edge map
+        points = self.select_important_points(edges, self.config.num_initial_points)
+
+        # We'll maintain a set of points (unique coordinates) across iterations
+        # Convert to integer coordinates for indexing colors/weights
+        points_int = np.round(points).astype(int)
+        points_int[:, 0] = np.clip(points_int[:, 0], 0, w - 1)
+        points_int[:, 1] = np.clip(points_int[:, 1], 0, h - 1)
+
+        # Initial colors and weights from the image and edge map
+        colors = img[points_int[:, 1], points_int[:, 0]]
+        weights = edges[points_int[:, 1], points_int[:, 0]]
+
+        best_gaussians = []
+        best_rendered = None
+        best_error = float('inf')
+
+        for iteration in range(self.config.max_iterations):
+            # Build quadtree with current points
+            bbox = (0, w, 0, h)
+            gaussians = self.build_quadtree(img, edges, points, colors, weights, bbox)
+
+            # Optionally split large Gaussians (density refinement)
+            gaussians = self.split_large_gaussians(gaussians)
+
+            # Render using alpha compositing
+            rendered = self.render_gaussians(gaussians, (h, w))
+
+            # Compute overall error
+            error_map = self.compute_error_map(img, rendered)
+            mse = np.mean(error_map)
+
+            print(f"Iteration {iteration+1}: MSE = {mse:.6f}, #Gaussians = {len(gaussians)}")
+
+            # Keep best result (lowest MSE)
+            if mse < best_error:
+                best_error = mse
+                best_gaussians = gaussians
+                best_rendered = rendered
+
+            # Stop if error below threshold
+            if mse < self.config.error_threshold:
+                print("Error threshold reached.")
+                break
+
+            # Sample new points from error map and add to the set
+            new_points = self.sample_new_points_from_error(error_map, self.config.points_per_iteration)
+            new_points_int = np.round(new_points).astype(int)
+            new_points_int[:, 0] = np.clip(new_points_int[:, 0], 0, w - 1)
+            new_points_int[:, 1] = np.clip(new_points_int[:, 1], 0, h - 1)
+
+            # Merge new points with existing ones (avoid duplicates by using a set of tuples)
+            # For simplicity, we just concatenate; duplicates are okay but may waste computation.
+            points = np.vstack([points, new_points])
+            points_int = np.vstack([points_int, new_points_int])
+
+            # Append corresponding colors and weights
+            new_colors = img[new_points_int[:, 1], new_points_int[:, 0]]
+            new_weights = edges[new_points_int[:, 1], new_points_int[:, 0]]
+            colors = np.vstack([colors, new_colors])
+            weights = np.hstack([weights, new_weights])
+
+        self.gaussians = best_gaussians
+        self.rendered = best_rendered
+        return best_gaussians, best_rendered
+
+    # ------------------------------------------------------------
+    # Required Base Method
+    # ------------------------------------------------------------
+
+    def render(self, return_gaussians=False):
+        gaussians, final = self.run_pipeline()
+        if return_gaussians:
+            return final, gaussians
+        else:
+            return final
