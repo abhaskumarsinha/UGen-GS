@@ -316,17 +316,125 @@ class Gaussian2D:
 
 @dataclass
 class RecursiveDensifyConfig:
+    # ------------------------------------------------------------
+    # Basic image and sampling parameters
+    # ------------------------------------------------------------
     target_size: Tuple[int, int] = (512, 512)
-    num_initial_points: int = 5000          # dense sampling from edges
-    var_threshold: float = 0.01              # stop when color variance < this
+    """
+    The dimensions (width, height) to which the input image is resized.
+    Larger sizes retain more detail but increase computation time and the
+    number of Gaussians.
+    """
+
+    num_initial_points: int = 5000
+    """
+    Number of points sampled from the edge map to initialize the quadtree.
+    Higher values provide better coverage of fine details but slow down
+    the quadtree construction. Typical range: 2000–10000 depending on image
+    complexity and target size.
+    """
+
+    # ------------------------------------------------------------
+    # Quadtree subdivision control
+    # ------------------------------------------------------------
+    var_threshold: float = 0.01
+    """
+    Threshold on the mean color variance of points inside a quadtree cell.
+    If the variance is below this value, the cell is considered homogeneous
+    and a single Gaussian is fitted (stop subdividing).
+    
+    - Lower values (e.g., 0.001) force more subdivision, yielding more
+      Gaussians and capturing finer color variations.
+    - Higher values (e.g., 0.05) lead to earlier stopping, producing fewer,
+      larger Gaussians and a smoother approximation.
+    Range: typically 0.001–0.05.
+    """
+
     max_points_per_leaf: int = 5
+    """
+    Maximum number of points allowed in a leaf node before forcing subdivision.
+    A smaller number (e.g., 3) creates more, smaller Gaussians; a larger number
+    (e.g., 10) creates fewer, larger Gaussians. This interacts with
+    `var_threshold` – if a cell has many points but low variance, it may still
+    become a leaf.
+    """
+
     min_bbox_size: int = 8
-    cov_split_threshold: float = 5.0         # split Gaussians with max eigenvalue > this
-    coverage_threshold: float = 0.5 
-    num_fill_points: float = 500
+    """
+    Minimum width or height (in pixels) of a quadtree cell. If a cell becomes
+    smaller than this, it is not subdivided further regardless of point count
+    or variance. This prevents excessively tiny Gaussians. Typical: 4–16 pixels.
+    """
+
+    # ------------------------------------------------------------
+    # Gaussian splitting (after fitting)
+    # ------------------------------------------------------------
+    cov_split_threshold: float = 5.0
+    """
+    If the largest eigenvalue of a Gaussian's covariance exceeds this value,
+    the Gaussian is split into two along the principal axis (each with half the
+    covariance). This helps break up overly broad splats that might otherwise
+    blur details.
+    
+    - Lower values (e.g., 3.0) cause more aggressive splitting, producing more
+      and smaller Gaussians.
+    - Higher values (e.g., 10.0) allow larger Gaussians to remain, which can
+      fill large smooth areas efficiently but may cause slight blurring.
+    The value is in pixel units (variance, not standard deviation). For a
+    Gaussian with standard deviation s, eigenvalue ≈ s².
+    """
+
+    # ------------------------------------------------------------
+    # Gap‑filling (add new Gaussians)
+    # ------------------------------------------------------------
+    coverage_threshold: float = 0.5
+    """
+    Used in `fill_gaps`: pixels where the accumulated alpha from all Gaussians
+    is below this threshold are considered under‑covered. New Gaussians will be
+    added at sampled locations within these gaps.
+    
+    - Lower values (e.g., 0.3) mean only the most severe gaps are filled.
+    - Higher values (e.g., 0.8) fill even slight under‑coverage, adding many
+      small Gaussians and potentially over‑fitting.
+    Range: 0.0–1.0.
+    """
+
+    num_fill_points: int = 500
+    """
+    Maximum number of new Gaussians to add during gap‑filling. This prevents
+    an explosion of Gaussians. Increase if large gaps remain; decrease to
+    limit total Gaussian count.
+    """
+
+    # ------------------------------------------------------------
+    # Gap‑filling by blurring existing Gaussians
+    # ------------------------------------------------------------
     blur_coverage_threshold: float = 0.5
+    """
+    In `blur_gaussians_to_fill_gaps`, this is the coverage threshold used to
+    identify under‑covered pixels (same meaning as `coverage_threshold`).
+    Typically set to the same value as `coverage_threshold` (0.5).
+    """
+
     blur_factor: float = 1.2
+    """
+    Factor by which the covariance matrix of a selected Gaussian is multiplied
+    to make it larger (blurrier). Values just above 1 (e.g., 1.1–1.5) give a
+    gentle expansion; higher values (2.0) cause more aggressive filling but
+    may blur edges excessively.
+    """
+
     min_contribution_ratio: float = 0.1
+    """
+    A Gaussian is selected for blurring if the fraction of its alpha
+    contribution that falls into under‑covered pixels is at least this value.
+    
+    - Lower values (e.g., 0.05) blur more Gaussians, filling gaps more
+      thoroughly but potentially blurring areas that are already well covered.
+    - Higher values (e.g., 0.2) restrict blurring only to Gaussians that are
+      heavily responsible for gaps, preserving sharpness elsewhere.
+    Range: 0.0–1.0.
+    """
 
 
 class RecursiveQuadtreeDensifyEncoder(EncoderAlgorithms):
