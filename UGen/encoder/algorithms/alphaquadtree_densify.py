@@ -324,6 +324,9 @@ class RecursiveDensifyConfig:
     cov_split_threshold: float = 5.0         # split Gaussians with max eigenvalue > this
     coverage_threshold: float = 0.5 
     num_fill_points: float = 500
+    blur_coverage_threshold: float = 0.5
+    blur_factor: float = 1.2
+    min_contribution_ratio: float = 0.1
 
 
 class RecursiveQuadtreeDensifyEncoder(EncoderAlgorithms):
@@ -337,6 +340,77 @@ class RecursiveQuadtreeDensifyEncoder(EncoderAlgorithms):
         self.config = config
         self.gaussians: List[Gaussian2D] = []
         self.rendered = None
+
+    def blur_gaussians_to_fill_gaps(self, gaussians: List[Gaussian2D], image: np.ndarray,
+                                 coverage_threshold: float = 0.5,
+                                 blur_factor: float = 1.2,
+                                 min_contribution_ratio: float = 0.1) -> List[Gaussian2D]:
+    """
+    Increase the covariance of Gaussians that significantly contribute to under‑covered areas.
+    
+    Parameters
+    ----------
+    coverage_threshold : float
+        Pixels with accumulated alpha below this are considered under‑covered.
+    blur_factor : float
+        Multiply the covariance matrix of selected Gaussians by this factor.
+    min_contribution_ratio : float
+        A Gaussian is selected if the fraction of its alpha contribution that falls
+        in under‑covered pixels exceeds this ratio.
+    """
+    h, w = image.shape[:2]
+
+    # 1. Render the alpha accumulation map and per‑Gaussian alpha maps (optional)
+    xs, ys = np.meshgrid(np.arange(w), np.arange(h))
+    coords = np.stack([xs, ys], axis=-1).astype(np.float32)
+
+    # We'll store per‑Gaussian alpha contributions to compute ratios later
+    gaussian_alphas = []  # list of (h, w) arrays for each Gaussian
+    alpha_acc = np.zeros((h, w), dtype=np.float32)
+
+    for g in gaussians:
+        delta = coords - g.mean
+        try:
+            inv_cov = np.linalg.inv(g.cov)
+        except np.linalg.LinAlgError:
+            inv_cov = np.linalg.pinv(g.cov)
+
+        exponent = np.einsum('...i,ij,...j->...', delta, inv_cov, delta)
+        density = np.exp(-0.5 * exponent)
+        alpha = g.opacity * density
+        alpha = np.clip(alpha, 0, 1)
+
+        gaussian_alphas.append(alpha.copy())
+        alpha_acc += (1.0 - alpha_acc) * alpha
+        alpha_acc = np.clip(alpha_acc, 0, 1)
+
+    # 2. Identify under‑covered pixels
+    low_mask = alpha_acc < coverage_threshold
+
+    # If no under‑covered pixels, return unchanged
+    if not np.any(low_mask):
+        return gaussians
+
+    # 3. For each Gaussian, compute contribution in low‑coverage area
+    new_gaussians = []
+    for g, g_alpha in zip(gaussians, gaussian_alphas):
+        total_contrib = g_alpha.sum()
+        low_contrib = g_alpha[low_mask].sum()
+
+        # If the Gaussian contributes significantly to under‑covered pixels, blur it
+        if total_contrib > 0 and (low_contrib / total_contrib) >= min_contribution_ratio:
+            # Increase covariance (blur)
+            new_cov = g.cov * blur_factor
+            # Ensure it remains positive definite
+            new_cov += np.eye(2) * 1e-6
+            new_g = Gaussian2D(mean=g.mean.copy(), cov=new_cov,
+                               color=g.color.copy(), opacity=g.opacity)
+        else:
+            new_g = g
+        new_gaussians.append(new_g)
+
+    return new_gaussians
+    
     def fill_gaps(self, gaussians: List[Gaussian2D], image: np.ndarray,
                   coverage_threshold: float = 0.5, num_fill_points: int = 500) -> List[Gaussian2D]:
         """
@@ -564,6 +638,11 @@ class RecursiveQuadtreeDensifyEncoder(EncoderAlgorithms):
     
         colors = img[points_int[:, 1], points_int[:, 0]]
         weights = edges[points_int[:, 1], points_int[:, 0]]
+
+        gaussians = self.blur_gaussians_to_fill_gaps(gaussians, img,
+                                             self.config.blur_coverage_threshold,
+                                             self.config.blur_factor,
+                                             self.config.min_contribution_ratio)
     
         bbox = (0, w, 0, h)
         gaussians = self.build_quadtree(img, edges, points, colors, weights, bbox)
