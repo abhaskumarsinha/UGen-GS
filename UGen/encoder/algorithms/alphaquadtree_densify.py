@@ -81,12 +81,15 @@ class AlphaQuadtreeDensifyEncoder(EncoderAlgorithms):
 
     def fit_gaussian_to_region(self, points: np.ndarray, colors: np.ndarray, weights: np.ndarray) -> Gaussian2D:
         mean, cov = self.weighted_mean_cov(points, weights)
-        if len(colors) > 0:
+        total_weight = weights.sum()
+        if total_weight > 0:
             avg_color = np.average(colors, axis=0, weights=weights)
         else:
-            avg_color = np.array([0.5, 0.5, 0.5])
-        # Opacity can be set to 1.0 initially, or we could use the total weight to control blending.
-        # Here we keep opacity = 1.0 and rely on density falloff.
+            # Fallback to unweighted average if there are points, else default gray
+            if len(colors) > 0:
+                avg_color = np.mean(colors, axis=0)
+            else:
+                avg_color = np.array([0.5, 0.5, 0.5])
         return Gaussian2D(mean=mean, cov=cov, color=avg_color, opacity=1.0)
 
     def build_quadtree(self, image: np.ndarray, edge_map: np.ndarray,
