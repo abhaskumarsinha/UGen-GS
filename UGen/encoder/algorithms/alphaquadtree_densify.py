@@ -322,6 +322,8 @@ class RecursiveDensifyConfig:
     max_points_per_leaf: int = 5
     min_bbox_size: int = 8
     cov_split_threshold: float = 5.0         # split Gaussians with max eigenvalue > this
+    coverage_threshold: float = 0.5 
+    num_fill_points: float = 500
 
 
 class RecursiveQuadtreeDensifyEncoder(EncoderAlgorithms):
@@ -335,7 +337,60 @@ class RecursiveQuadtreeDensifyEncoder(EncoderAlgorithms):
         self.config = config
         self.gaussians: List[Gaussian2D] = []
         self.rendered = None
-
+    def fill_gaps(self, gaussians: List[Gaussian2D], image: np.ndarray,
+                  coverage_threshold: float = 0.5, num_fill_points: int = 500) -> List[Gaussian2D]:
+        """
+        Identify under‑covered pixels (alpha < threshold) and add new Gaussians there.
+        """
+        h, w = image.shape[:2]
+    
+        # 1. Render the alpha accumulation map using the existing Gaussians
+        xs, ys = np.meshgrid(np.arange(w), np.arange(h))
+        coords = np.stack([xs, ys], axis=-1).astype(np.float32)
+    
+        alpha_acc = np.zeros((h, w), dtype=np.float32)
+    
+        for g in gaussians:
+            delta = coords - g.mean
+            try:
+                inv_cov = np.linalg.inv(g.cov)
+            except np.linalg.LinAlgError:
+                inv_cov = np.linalg.pinv(g.cov)
+    
+            exponent = np.einsum('...i,ij,...j->...', delta, inv_cov, delta)
+            density = np.exp(-0.5 * exponent)
+            alpha = g.opacity * density
+            alpha = np.clip(alpha, 0, 1)
+    
+            alpha_acc += (1.0 - alpha_acc) * alpha
+            alpha_acc = np.clip(alpha_acc, 0, 1)
+    
+        # 2. Find pixels where coverage is low
+        low_coverage_mask = alpha_acc < coverage_threshold
+        y_idxs, x_idxs = np.where(low_coverage_mask)
+    
+        if len(x_idxs) == 0:
+            return gaussians  # nothing to fill
+    
+        # 3. Sample points from low‑coverage regions
+        # Use a uniform distribution (or weight by error if desired)
+        num_samples = min(num_fill_points, len(x_idxs))
+        sample_indices = np.random.choice(len(x_idxs), size=num_samples, replace=False)
+        fill_points = np.stack([x_idxs[sample_indices], y_idxs[sample_indices]], axis=1).astype(np.float32)
+    
+        # 4. Create new Gaussians with small isotropic covariance
+        new_gaussians = []
+        for pt in fill_points:
+            mean = pt
+            cov = np.eye(2) * 1.0  # 1 pixel standard deviation
+            # Colour from the original image at that location
+            color = image[int(pt[1]), int(pt[0])]  # (y, x)
+            new_g = Gaussian2D(mean=mean, cov=cov, color=color, opacity=1.0)
+            new_gaussians.append(new_g)
+    
+        # 5. Merge and return
+        return gaussians + new_gaussians
+                      
     # ------------------------------------------------------------
     # Helper functions (adapted from previous)
     # ------------------------------------------------------------
@@ -495,33 +550,29 @@ class RecursiveQuadtreeDensifyEncoder(EncoderAlgorithms):
     # ------------------------------------------------------------
     # Single‑pass pipeline
     # ------------------------------------------------------------
-
+    
     def run_pipeline(self) -> Tuple[List[Gaussian2D], np.ndarray]:
         img = self.load_image(self.image_path, self.config.target_size)
         h, w = img.shape[:2]
-
-        # Edge map for importance sampling
+    
         _, edges = self.to_grayscale_with_edges(img)
-
-        # Sample initial points densely from edges
+    
         points = self.select_important_points(edges, self.config.num_initial_points)
-
-        # Convert to integer coordinates for indexing colors/weights
         points_int = np.round(points).astype(int)
         points_int[:, 0] = np.clip(points_int[:, 0], 0, w - 1)
         points_int[:, 1] = np.clip(points_int[:, 1], 0, h - 1)
-
-        # Fetch colors and weights at sampled points
+    
         colors = img[points_int[:, 1], points_int[:, 0]]
         weights = edges[points_int[:, 1], points_int[:, 0]]
-
-        # Recursively build quadtree and obtain Gaussians
+    
         bbox = (0, w, 0, h)
         gaussians = self.build_quadtree(img, edges, points, colors, weights, bbox)
-
-        # Render final image
+    
+        # --- Gap filling ---
+        gaussians = self.fill_gaps(gaussians, img, self.config.coverage_threshold, self.config.num_fill_points)
+    
         rendered = self.render_gaussians(gaussians, (h, w))
-
+    
         self.gaussians = gaussians
         self.rendered = rendered
         return gaussians, rendered
