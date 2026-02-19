@@ -157,7 +157,7 @@ class GaussianRasterizerDecoder(BaseRasterizer):
         # Gaussian parameters
         means3D = gaussian["position"].to(torch.float32)               # (N, 3)
         means2D = gaussian["mean2D"].to(torch.float32)               # (N, 3)
-        scales = (gaussian["scale"] * 0.001).to(torch.float32)         # (N, 3)
+        scales = (gaussian["scale"]).to(torch.float32)         # (N, 3)
     
         # ---------- FIX 1: Opacity shape (N, 1) ----------
         # Remove squeeze; ensure shape is (N, 1)
