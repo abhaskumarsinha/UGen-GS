@@ -23,7 +23,7 @@ class ColmapImporterConfig:
 
     # gaussian options
     sh_degree: int = 0
-    default_scale: float = 1.0
+    default_scale: float = 0.001
     default_alpha: float = 1.0
     default_quat: Tuple[float, float, float, float] = (1.0, 0.0, 0.0, 0.0)
 
@@ -206,5 +206,6 @@ class ColmapImporter:
         cameras = self._import_cameras()
         gaussians = self._import_gaussians()
         return gaussians, cameras
+
 
 
