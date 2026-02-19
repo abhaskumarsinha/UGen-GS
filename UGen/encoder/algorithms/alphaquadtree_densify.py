@@ -518,11 +518,14 @@ class RecursiveQuadtreeDensifyEncoder(EncoderAlgorithms):
             new_gaussians.append(new_g)
     
         return new_gaussians
-    
+        
     def fill_gaps(self, gaussians: List[Gaussian2D], image: np.ndarray,
-                  coverage_threshold: float = 0.5, num_fill_points: int = 500) -> List[Gaussian2D]:
+                  coverage_threshold: float = 0.5, num_fill_points: int = 500,
+                  importance_map: Optional[np.ndarray] = None) -> List[Gaussian2D]:
         """
         Identify under‑covered pixels (alpha < threshold) and add new Gaussians there.
+        If an importance_map is given, sampling is weighted by its values (e.g., edge magnitude),
+        so that new Gaussians are placed preferentially in important regions.
         """
         h, w = image.shape[:2]
     
@@ -555,9 +558,20 @@ class RecursiveQuadtreeDensifyEncoder(EncoderAlgorithms):
             return gaussians  # nothing to fill
     
         # 3. Sample points from low‑coverage regions
-        # Use a uniform distribution (or weight by error if desired)
         num_samples = min(num_fill_points, len(x_idxs))
-        sample_indices = np.random.choice(len(x_idxs), size=num_samples, replace=False)
+    
+        if importance_map is not None:
+            # Get importance values at the low‑coverage pixels
+            imp_values = importance_map[low_coverage_mask]
+            # Avoid zero probabilities (add a tiny constant)
+            imp_values = imp_values + 1e-6
+            probs = imp_values / imp_values.sum()
+            # Importance‑weighted sampling without replacement
+            sample_indices = np.random.choice(len(x_idxs), size=num_samples, replace=False, p=probs)
+        else:
+            # Uniform random sampling (original behaviour)
+            sample_indices = np.random.choice(len(x_idxs), size=num_samples, replace=False)
+    
         fill_points = np.stack([x_idxs[sample_indices], y_idxs[sample_indices]], axis=1).astype(np.float32)
     
         # 4. Create new Gaussians with small isotropic covariance
@@ -732,7 +746,7 @@ class RecursiveQuadtreeDensifyEncoder(EncoderAlgorithms):
     # ------------------------------------------------------------
     # Single‑pass pipeline
     # ------------------------------------------------------------
-    
+        
     def run_pipeline(self) -> Tuple[List[Gaussian2D], np.ndarray]:
         img = self.load_image(self.image_path, self.config.target_size)
         h, w = img.shape[:2]
@@ -749,14 +763,17 @@ class RecursiveQuadtreeDensifyEncoder(EncoderAlgorithms):
     
         bbox = (0, w, 0, h)
         gaussians = self.build_quadtree(img, edges, points, colors, weights, bbox)
-
+    
         gaussians = self.blur_gaussians_to_fill_gaps(gaussians, img,
                                      self.config.blur_coverage_threshold,
                                      self.config.blur_factor,
                                      self.config.min_contribution_ratio)
     
-        # --- Gap filling ---
-        gaussians = self.fill_gaps(gaussians, img, self.config.coverage_threshold, self.config.num_fill_points)
+        # --- Gap filling with edge‑guided sampling ---
+        gaussians = self.fill_gaps(gaussians, img,
+                                   self.config.coverage_threshold,
+                                   self.config.num_fill_points,
+                                   importance_map=edges)   # <-- pass edge map
     
         rendered = self.render_gaussians(gaussians, (h, w))
     
