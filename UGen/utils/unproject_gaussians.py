@@ -4,6 +4,8 @@ from sklearn.neighbors import NearestNeighbors
 from typing import List, Tuple, Dict
 from dataclasses import dataclass
 
+from UGen.sfm import *
+
 @dataclass
 class Gaussian3D:
     mean: np.ndarray       # (3,)
