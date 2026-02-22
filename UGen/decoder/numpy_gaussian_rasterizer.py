@@ -3,7 +3,7 @@ from typing import Optional, Tuple
 from UGen.decoder.base import *
 
 @dataclass
-class GaussianRendererConfig:
+class GaussianRGBRendererConfig:
     width: int = 160
     height: int = 120
     fx: float = 120.0
@@ -20,7 +20,7 @@ class GaussianRendererConfig:
 
 import numpy as np
 
-class GaussianRasterizer(BaseRasterizer):
+class GaussianRGBRenderer(BaseRasterizer):
     def __init__(self, width, height, background_color=(0,0,0), splat_scale=1.0):
         super().__init__(width, height, background_color)
         self.splat_scale = splat_scale
