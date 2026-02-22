@@ -21,9 +21,8 @@ class GaussianRGBRendererConfig:
 import numpy as np
 
 class GaussianRGBRenderer(BaseRasterizer):
-    def __init__(self, width, height, background_color=(0,0,0), splat_scale=1.0):
-        super().__init__(width, height, background_color)
-        self.splat_scale = splat_scale
+    def __init__(self, config: GaussianRendererConfig):
+        self.cfg = config
     
     def render(self, gaussians):
 
