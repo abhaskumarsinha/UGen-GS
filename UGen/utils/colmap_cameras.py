@@ -1,4 +1,4 @@
-from UGen.utils.2d_3d_gaussians import *
+from UGen.utils.unproj_gaussians import *
 
 
 def import_colmap_cameras(
