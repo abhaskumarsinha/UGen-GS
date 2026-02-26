@@ -25,13 +25,13 @@ def get_lod_configs(width, height):
     return {
 
         "low": {
-            "target_points": 1000,
+            "target_points": 800,
             "min_bbox_size": 6,
             "var_threshold": 2.94e-05,
             "max_points_per_leaf": 9,
             "cov_split_threshold": 3.753023113,
             "coverage_threshold": 0.48833341,
-            "num_fill_points": 999,
+            "num_fill_points": 200,
             "blur_coverage_threshold": 0.964467743,
             "blur_factor": 10,
             "min_contribution_ratio": 0.185161798
@@ -44,7 +44,7 @@ def get_lod_configs(width, height):
             "max_points_per_leaf": 7,
             "cov_split_threshold": 4.163973149,
             "coverage_threshold": 0.418701411,
-            "num_fill_points": 841,
+            "num_fill_points": 500,
             "blur_coverage_threshold": 0.569876154,
             "blur_factor": 9,
             "min_contribution_ratio": 0.265283058
