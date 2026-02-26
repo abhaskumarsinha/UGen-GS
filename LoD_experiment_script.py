@@ -64,6 +64,42 @@ def get_lod_configs(width, height):
         }
     }
 
+import matplotlib.pyplot as plt
+import numpy as np
+import os
+
+def save_rendered_publication(
+    rendered,
+    output_path,
+    width_inches=3.5,
+    dpi=600
+):
+    """
+    Save rendered tensor as publication-quality image.
+    """
+
+    # Convert tensor to numpy if needed
+    if hasattr(rendered, "detach"):
+        rendered = rendered.detach().cpu().numpy()
+
+    rendered = np.array(rendered)
+
+    # Normalize if needed
+    if rendered.max() > 1.0:
+        rendered = rendered / 255.0
+
+    h, w = rendered.shape[:2]
+    aspect = h / w
+
+    fig_height = width_inches * aspect
+
+    fig = plt.figure(figsize=(width_inches, fig_height), dpi=dpi)
+    plt.imshow(rendered, cmap=None if rendered.ndim == 3 else "gray")
+    plt.axis("off")
+
+    plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
+    plt.savefig(output_path, dpi=dpi, bbox_inches="tight", pad_inches=0)
+    plt.close(fig)
 
 # =========================
 # Experiment Runner
@@ -99,6 +135,13 @@ def run_trials(lod_name, cfg_dict, n_trials, input_image_path, y0, width, height
 
         rendered, gaussians = enc.render(return_gaussians=True)
         gaussian_count = len(gaussians)
+
+        render_path = os.path.join(
+            args.output_dir,
+            f"{lod_name}_run_{i+1}.png"
+        )
+        
+        save_rendered_publication(rendered, render_path)
 
         evaluator = GaussianSplattingEvaluator(y0)
         expt_name = f"{lod_name}_{str(uuid.uuid4())[:8]}"
