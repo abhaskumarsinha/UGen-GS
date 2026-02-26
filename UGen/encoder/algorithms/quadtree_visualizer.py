@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle, Ellipse
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
+import os
 
 # ----------------------------------------------------------------------
 # Gaussian2D class
@@ -328,7 +329,7 @@ class RecursiveQuadtreeDensifyEncoder:
 
 
 # ----------------------------------------------------------------------
-# Visualizer (with pixel‑exact saving)
+# Visualizer (with individual illustration saving)
 # ----------------------------------------------------------------------
 class RecursiveQuadtreeVisualizer:
     def __init__(self, image_path: str, config: RecursiveDensifyConfig):
@@ -343,8 +344,15 @@ class RecursiveQuadtreeVisualizer:
         )
 
     # ------------------------------------------------------------------
-    # Plotting helpers
+    # Plotting helpers (low‑level)
     # ------------------------------------------------------------------
+    def _setup_axes(self, ax):
+        """Set common axis limits and aspect."""
+        ax.set_xlim(0, self.w)
+        ax.set_ylim(self.h, 0)
+        ax.set_aspect('equal')
+        ax.axis('off')  # hide axes for clean illustrations
+
     def plot_initial_samples(self, ax, color='red', s=1, alpha=0.5):
         ax.scatter(self.initial_points[:, 0], self.initial_points[:, 1],
                    c=color, s=s, alpha=alpha, label='Initial samples')
@@ -361,17 +369,6 @@ class RecursiveQuadtreeVisualizer:
                        fill=True,
                        edgecolor='black',
                        alpha=0.6):
-        """
-        Plot Gaussians as ellipses.
-
-        Parameters
-        ----------
-        which : 'leaf' or 'final'
-        facecolor_from_color : if fill=True, use Gaussian colour when True, else 'gray'
-        fill : if False, ellipse is not filled (only edge drawn)
-        edgecolor : colour of the ellipse edge
-        alpha : transparency of fill and edge
-        """
         if which == 'leaf':
             gaussians = [g for (_, g) in self.encoder.leaf_cells]
         elif which == 'final':
@@ -410,126 +407,144 @@ class RecursiveQuadtreeVisualizer:
         angle = np.degrees(np.arctan2(eigvecs[1, 0], eigvecs[0, 0]))
         return width, height, angle
 
-    def plot_rendered(self, ax):
-        ax.imshow(self.rendered)
+    # ------------------------------------------------------------------
+    # Single‑illustration figure creators
+    # ------------------------------------------------------------------
+    def _create_single_figure(self, width_pixels=2070, dpi=600):
+        """Create a figure of the exact pixel width (inches = width_pixels/dpi)."""
+        width_inches = width_pixels / dpi
+        # Height is determined by the image aspect ratio (h/w)
+        height_inches = width_inches * (self.h / self.w)
+        fig, ax = plt.subplots(1, 1, figsize=(width_inches, height_inches), dpi=dpi)
+        return fig, ax
 
-    def plot_original(self, ax):
+    def get_original_figure(self, width_pixels=2070, dpi=600):
+        """Figure with only the original image."""
+        fig, ax = self._create_single_figure(width_pixels, dpi)
         ax.imshow(self.image)
+        self._setup_axes(ax)
+        return fig
+
+    def get_sobel_figure(self, width_pixels=2070, dpi=600,
+                         point_color='red', point_size=1, point_alpha=0.5):
+        """Figure with original image + Sobel initial points."""
+        fig, ax = self._create_single_figure(width_pixels, dpi)
+        ax.imshow(self.image)
+        self.plot_initial_samples(ax, color=point_color, s=point_size, alpha=point_alpha)
+        self._setup_axes(ax)
+        return fig
+
+    def get_quadtree_figure(self, width_pixels=2070, dpi=600,
+                            cell_color='blue', cell_linewidth=1, cell_alpha=0.3):
+        """Figure with original image + quadtree leaf cells."""
+        fig, ax = self._create_single_figure(width_pixels, dpi)
+        ax.imshow(self.image)
+        self.plot_quadtree_cells(ax, edgecolor=cell_color, linewidth=cell_linewidth, alpha=cell_alpha)
+        self._setup_axes(ax)
+        return fig
+
+    def get_gaussians_figure(self, which='final', width_pixels=2070, dpi=600,
+                             fill=True, edgecolor='white', alpha=0.6):
+        """Figure with original image + Gaussians (leaf or final)."""
+        fig, ax = self._create_single_figure(width_pixels, dpi)
+        ax.imshow(self.image)
+        self.plot_gaussians(ax, which=which, fill=fill, edgecolor=edgecolor, alpha=alpha)
+        self._setup_axes(ax)
+        return fig
 
     # ------------------------------------------------------------------
-    # Multi‑panel figure with pixel‑exact sizing
+    # Saving methods
     # ------------------------------------------------------------------
-    def create_figure(self, rows=2, cols=3, figsize=(15, 10),
-                      output_width_pixels=None, dpi=None,
-                      show_original=True, show_initial=True,
-                      show_quad=True, show_leaf_gaussians=False,
-                      show_final_gaussians=True, show_rendered=True,
-                      ellipse_fill=True, ellipse_edgecolor='white', ellipse_alpha=0.6):
+    def save_original_png(self, save_path, width_pixels=2070, dpi=600):
+        """Save original image as PNG."""
+        fig = self.get_original_figure(width_pixels, dpi)
+        plt.savefig(save_path, dpi=dpi, bbox_inches='tight', pad_inches=0)
+        plt.close(fig)
+
+    def save_sobel_png(self, save_path, width_pixels=2070, dpi=600,
+                       point_color='red', point_size=1, point_alpha=0.5):
+        """Save Sobel initial samples as PNG."""
+        fig = self.get_sobel_figure(width_pixels, dpi, point_color, point_size, point_alpha)
+        plt.savefig(save_path, dpi=dpi, bbox_inches='tight', pad_inches=0)
+        plt.close(fig)
+
+    def save_quadtree_png(self, save_path, width_pixels=2070, dpi=600,
+                          cell_color='blue', cell_linewidth=1, cell_alpha=0.3):
+        """Save quadtree cells as PNG."""
+        fig = self.get_quadtree_figure(width_pixels, dpi, cell_color, cell_linewidth, cell_alpha)
+        plt.savefig(save_path, dpi=dpi, bbox_inches='tight', pad_inches=0)
+        plt.close(fig)
+
+    def save_quadtree_pdf(self, save_path, width_pixels=2070, dpi=600,
+                          cell_color='blue', cell_linewidth=1, cell_alpha=0.3):
+        """Save quadtree cells as PDF (vector)."""
+        fig = self.get_quadtree_figure(width_pixels, dpi, cell_color, cell_linewidth, cell_alpha)
+        plt.savefig(save_path, format='pdf', bbox_inches='tight', pad_inches=0)
+        plt.close(fig)
+
+    def save_gaussians_png(self, which='final', save_path=None, width_pixels=2070, dpi=600,
+                           fill=True, edgecolor='white', alpha=0.6):
+        """Save Gaussians as PNG."""
+        fig = self.get_gaussians_figure(which, width_pixels, dpi, fill, edgecolor, alpha)
+        plt.savefig(save_path, dpi=dpi, bbox_inches='tight', pad_inches=0)
+        plt.close(fig)
+
+    def save_gaussians_pdf(self, which='final', save_path=None, width_pixels=2070, dpi=600,
+                           fill=True, edgecolor='white', alpha=0.6):
+        """Save Gaussians as PDF (vector)."""
+        fig = self.get_gaussians_figure(which, width_pixels, dpi, fill, edgecolor, alpha)
+        plt.savefig(save_path, format='pdf', bbox_inches='tight', pad_inches=0)
+        plt.close(fig)
+
+    # ------------------------------------------------------------------
+    # Batch save all illustrations
+    # ------------------------------------------------------------------
+    def save_all(self, base_name, output_dir='.', width_pixels=2070, dpi=600,
+                 sobel_point_color='red', sobel_point_size=1, sobel_point_alpha=0.5,
+                 cell_color='blue', cell_linewidth=1, cell_alpha=0.3,
+                 gaussians_fill=False, gaussians_edgecolor='white', gaussians_alpha=1.0):
         """
-        Create a figure with selected subplots.
-
-        Parameters
-        ----------
-        rows, cols : int
-            Grid dimensions.
-        figsize : tuple, optional
-            Figure size in inches. Ignored if output_width_pixels and dpi are given.
-        output_width_pixels : int, optional
-            Desired width of the saved figure in pixels.
-        dpi : float, optional
-            Dots per inch for the figure. Must be provided with output_width_pixels.
-        ... (other parameters as before)
+        Save all six illustrations:
+        - original.png
+        - sobel.png
+        - quadtree.png, quadtree.pdf
+        - leaf_gaussians.png, leaf_gaussians.pdf
+        - final_gaussians.png, final_gaussians.pdf
         """
-        # Determine figure size
-        if output_width_pixels is not None and dpi is not None:
-            # Compute figsize so that the total figure width in inches = output_width_pixels / dpi
-            # Approximate height based on the data aspect ratio of the grid
-            data_aspect = (rows * self.h) / (cols * self.w)   # height/width in data units
-            width_inches = output_width_pixels / dpi
-            height_inches = width_inches * data_aspect
-            figsize = (width_inches, height_inches)
-        # else use provided figsize
+        os.makedirs(output_dir, exist_ok=True)
 
-        panels = []
-        if show_original:
-            panels.append('original')
-        if show_initial:
-            panels.append('initial')
-        if show_quad:
-            panels.append('quad')
-        if show_leaf_gaussians:
-            panels.append('leaf_gauss')
-        if show_final_gaussians:
-            panels.append('final_gauss')
-        if show_rendered:
-            panels.append('rendered')
+        # Original
+        self.save_original_png(os.path.join(output_dir, f"{base_name}_original.png"), width_pixels, dpi)
 
-        n = len(panels)
-        if n == 0:
-            raise ValueError("No panels selected")
+        # Sobel
+        self.save_sobel_png(os.path.join(output_dir, f"{base_name}_sobel.png"), width_pixels, dpi,
+                            point_color=sobel_point_color, point_size=sobel_point_size,
+                            point_alpha=sobel_point_alpha)
 
-        fig, axes = plt.subplots(rows, cols, figsize=figsize)
-        if rows == 1 and cols == 1:
-            axes = np.array([axes])
-        axes = axes.flatten()
+        # Quadtree (PNG + PDF)
+        self.save_quadtree_png(os.path.join(output_dir, f"{base_name}_quadtree.png"), width_pixels, dpi,
+                               cell_color=cell_color, cell_linewidth=cell_linewidth, cell_alpha=cell_alpha)
+        self.save_quadtree_pdf(os.path.join(output_dir, f"{base_name}_quadtree.pdf"), width_pixels, dpi,
+                               cell_color=cell_color, cell_linewidth=cell_linewidth, cell_alpha=cell_alpha)
 
-        for i in range(n, len(axes)):
-            axes[i].axis('off')
+        # Leaf Gaussians (PNG + PDF)
+        self.save_gaussians_png(which='leaf',
+                                save_path=os.path.join(output_dir, f"{base_name}_leaf_gaussians.png"),
+                                width_pixels=width_pixels, dpi=dpi,
+                                fill=gaussians_fill, edgecolor=gaussians_edgecolor, alpha=gaussians_alpha)
+        self.save_gaussians_pdf(which='leaf',
+                                save_path=os.path.join(output_dir, f"{base_name}_leaf_gaussians.pdf"),
+                                width_pixels=width_pixels, dpi=dpi,
+                                fill=gaussians_fill, edgecolor=gaussians_edgecolor, alpha=gaussians_alpha)
 
-        for i, name in enumerate(panels):
-            ax = axes[i]
-            if name == 'original':
-                self.plot_original(ax)
-                ax.set_title('Original Image')
-            elif name == 'initial':
-                self.plot_original(ax)
-                self.plot_initial_samples(ax)
-                ax.set_title('Initial Samples (Sobel)')
-            elif name == 'quad':
-                self.plot_original(ax)
-                self.plot_quadtree_cells(ax)
-                ax.set_title('Quadtree Leaf Cells')
-            elif name == 'leaf_gauss':
-                self.plot_original(ax)
-                self.plot_gaussians(ax, which='leaf',
-                                    fill=ellipse_fill,
-                                    edgecolor=ellipse_edgecolor,
-                                    alpha=ellipse_alpha)
-                ax.set_title('Leaf Gaussians')
-            elif name == 'final_gauss':
-                self.plot_original(ax)
-                self.plot_gaussians(ax, which='final',
-                                    fill=ellipse_fill,
-                                    edgecolor=ellipse_edgecolor,
-                                    alpha=ellipse_alpha)
-                ax.set_title('Final Gaussians')
-            elif name == 'rendered':
-                self.plot_rendered(ax)
-                ax.set_title('Rendered Image')
+        # Final Gaussians (PNG + PDF)
+        self.save_gaussians_png(which='final',
+                                save_path=os.path.join(output_dir, f"{base_name}_final_gaussians.png"),
+                                width_pixels=width_pixels, dpi=dpi,
+                                fill=gaussians_fill, edgecolor=gaussians_edgecolor, alpha=gaussians_alpha)
+        self.save_gaussians_pdf(which='final',
+                                save_path=os.path.join(output_dir, f"{base_name}_final_gaussians.pdf"),
+                                width_pixels=width_pixels, dpi=dpi,
+                                fill=gaussians_fill, edgecolor=gaussians_edgecolor, alpha=gaussians_alpha)
 
-            ax.set_xlim(0, self.w)
-            ax.set_ylim(self.h, 0)
-            ax.set_aspect('equal')
-
-        plt.tight_layout()
-        return fig, axes
-
-    def show(self, save_path=None, dpi=600, **kwargs):
-        """
-        Display the figure and optionally save it.
-
-        Parameters
-        ----------
-        save_path : str, optional
-            If provided, save the figure to this path.
-        dpi : float
-            Dots per inch for saving (only used if save_path is given).
-        **kwargs : passed to create_figure.
-        """
-        fig, _ = self.create_figure(**kwargs)
-        if save_path:
-            # If output_width_pixels was used, the figure size already matches;
-            # otherwise you may want to set dpi accordingly.
-            plt.savefig(save_path, dpi=dpi, bbox_inches='tight')
-        plt.show()
 
