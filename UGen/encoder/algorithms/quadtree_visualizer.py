@@ -294,11 +294,17 @@ class RecursiveQuadtreeVisualizer:
             ax.add_patch(rect)
 
     def plot_gaussians(self, ax, which='final',
-                       facecolor_from_color=True, edgecolor='none', alpha=0.6):
+                       facecolor_from_color=True,  # only used if fill=True
+                       fill=True,                   # new: whether to fill the ellipse
+                       edgecolor='black',            # outline colour (default black)
+                       alpha=0.6):
         """
         Plot Gaussians as ellipses.
-        which : 'leaf' for the Gaussians stored with leaf cells (before splitting),
-                'final' for the final Gaussians after post‑processing.
+        which : 'leaf' or 'final'
+        facecolor_from_color : if fill=True, use Gaussian colour when True, else 'gray'
+        fill : if False, ellipse is not filled (only edge drawn)
+        edgecolor : colour of the ellipse edge (used when fill=False or to override edge)
+        alpha : transparency of fill and edge
         """
         if which == 'leaf':
             gaussians = [g for (_, g) in self.encoder.leaf_cells]
@@ -306,15 +312,24 @@ class RecursiveQuadtreeVisualizer:
             gaussians = self.gaussians
         else:
             raise ValueError("which must be 'leaf' or 'final'")
-
+    
         for g in gaussians:
             if g is None:
                 continue
             width, height, angle = self._cov_to_ellipse_params(g.cov)
-            color = g.color if facecolor_from_color else 'gray'
+    
+            if fill:
+                # Filled ellipse: colour from Gaussian or gray
+                facecolor = g.color if facecolor_from_color else 'gray'
+            else:
+                # No fill, only edge
+                facecolor = 'none'
+    
             ellipse = Ellipse(xy=(g.mean[0], g.mean[1]),
                               width=width, height=height, angle=angle,
-                              facecolor=color, edgecolor=edgecolor, alpha=alpha)
+                              facecolor=facecolor,
+                              edgecolor=edgecolor,
+                              alpha=alpha)
             ax.add_patch(ellipse)
 
     def _cov_to_ellipse_params(self, cov):
