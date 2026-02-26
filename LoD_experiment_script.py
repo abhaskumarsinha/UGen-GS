@@ -104,7 +104,7 @@ def save_rendered_publication(
 # =========================
 # Experiment Runner
 # =========================
-def run_trials(lod_name, cfg_dict, n_trials, input_image_path, y0, width, height):
+def run_trials(lod_name, cfg_dict, n_trials, input_image_path, y0, width, height, args):
 
     print(f"\n===== Running {lod_name.upper()} LoD =====")
 
@@ -201,7 +201,8 @@ def main():
             args.input_image,
             y0,
             args.width,
-            args.height
+            args.height,
+            args
         )
 
         # Save per-LoD CSV
