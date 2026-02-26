@@ -328,7 +328,7 @@ class RecursiveQuadtreeDensifyEncoder:
 
 
 # ----------------------------------------------------------------------
-# Visualizer (with updated plot_gaussians that supports outlines only)
+# Visualizer (with pixel‑exact saving)
 # ----------------------------------------------------------------------
 class RecursiveQuadtreeVisualizer:
     def __init__(self, image_path: str, config: RecursiveDensifyConfig):
@@ -417,24 +417,39 @@ class RecursiveQuadtreeVisualizer:
         ax.imshow(self.image)
 
     # ------------------------------------------------------------------
-    # Multi‑panel figure
+    # Multi‑panel figure with pixel‑exact sizing
     # ------------------------------------------------------------------
     def create_figure(self, rows=2, cols=3, figsize=(15, 10),
+                      output_width_pixels=None, dpi=None,
                       show_original=True, show_initial=True,
                       show_quad=True, show_leaf_gaussians=False,
                       show_final_gaussians=True, show_rendered=True,
-                      # New parameters to control ellipse style
-                      ellipse_fill=True,
-                      ellipse_edgecolor='white',
-                      ellipse_alpha=0.6):
+                      ellipse_fill=True, ellipse_edgecolor='white', ellipse_alpha=0.6):
         """
         Create a figure with selected subplots.
 
-        Additional parameters:
-        ellipse_fill : bool, whether to fill the Gaussian ellipses
-        ellipse_edgecolor : colour of ellipse edges (when fill=False or to outline)
-        ellipse_alpha : transparency of ellipses
+        Parameters
+        ----------
+        rows, cols : int
+            Grid dimensions.
+        figsize : tuple, optional
+            Figure size in inches. Ignored if output_width_pixels and dpi are given.
+        output_width_pixels : int, optional
+            Desired width of the saved figure in pixels.
+        dpi : float, optional
+            Dots per inch for the figure. Must be provided with output_width_pixels.
+        ... (other parameters as before)
         """
+        # Determine figure size
+        if output_width_pixels is not None and dpi is not None:
+            # Compute figsize so that the total figure width in inches = output_width_pixels / dpi
+            # Approximate height based on the data aspect ratio of the grid
+            data_aspect = (rows * self.h) / (cols * self.w)   # height/width in data units
+            width_inches = output_width_pixels / dpi
+            height_inches = width_inches * data_aspect
+            figsize = (width_inches, height_inches)
+        # else use provided figsize
+
         panels = []
         if show_original:
             panels.append('original')
@@ -499,8 +514,22 @@ class RecursiveQuadtreeVisualizer:
         plt.tight_layout()
         return fig, axes
 
-    def show(self, **kwargs):
-        fig, _ = self.create_figure(**kwargs)
-        plt.show()
+    def show(self, save_path=None, dpi=600, **kwargs):
+        """
+        Display the figure and optionally save it.
 
+        Parameters
+        ----------
+        save_path : str, optional
+            If provided, save the figure to this path.
+        dpi : float
+            Dots per inch for saving (only used if save_path is given).
+        **kwargs : passed to create_figure.
+        """
+        fig, _ = self.create_figure(**kwargs)
+        if save_path:
+            # If output_width_pixels was used, the figure size already matches;
+            # otherwise you may want to set dpi accordingly.
+            plt.savefig(save_path, dpi=dpi, bbox_inches='tight')
+        plt.show()
 
