@@ -69,18 +69,26 @@ def run_multiple_experiments(
             quadtreeden_cfg
         )
 
-        rendered = enc.render()
+        # ✅ UPDATED LINE
+        rendered, gaussians = enc.render(return_gaussians=True)
+
+        gaussian_count = len(gaussians)
 
         gs_eval = GaussianSplattingEvaluator(y0)
 
         expt_name = str(uuid.uuid4())[:8]
         result = gs_eval.add_algorithm_result(expt_name, rendered)
 
+        # ✅ Add Gaussian count to result dictionary
+        result["gaussian_count"] = gaussian_count
+
         all_results.append(result)
 
+        # Store metrics
         for k, v in result.items():
             metrics_storage[k].append(float(v))
 
+    # ---- Compute mean + std ----
     summary = {}
 
     for metric, values in metrics_storage.items():
