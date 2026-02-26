@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 # ----------------------------------------------------------------------
-# Minimal Gaussian2D class (adapt to your actual implementation if needed)
+# Gaussian2D class
 # ----------------------------------------------------------------------
 class Gaussian2D:
     def __init__(self, mean: np.ndarray, cov: np.ndarray, color: np.ndarray, opacity: float = 1.0):
@@ -16,7 +16,7 @@ class Gaussian2D:
         self.opacity = opacity
 
 # ----------------------------------------------------------------------
-# Configuration dataclass (same as before)
+# Configuration
 # ----------------------------------------------------------------------
 @dataclass
 class RecursiveDensifyConfig:
@@ -33,7 +33,7 @@ class RecursiveDensifyConfig:
     min_contribution_ratio: float = 0.1
 
 # ----------------------------------------------------------------------
-# Encoder class (records leaf cells for visualization)
+# Encoder (records leaf cells)
 # ----------------------------------------------------------------------
 class RecursiveQuadtreeDensifyEncoder:
     def __init__(self, image_path: str, config: RecursiveDensifyConfig):
@@ -79,16 +79,14 @@ class RecursiveQuadtreeDensifyEncoder:
     def weighted_mean_cov(self, points: np.ndarray, weights: np.ndarray):
         total_weight = weights.sum()
         if total_weight == 0 or len(points) == 0:
-            # Fallback for empty input (should not happen in practice)
             return np.zeros(2), np.eye(2) * 1e-6
         mean = np.average(points, axis=0, weights=weights)
         centered = points - mean
         cov = np.dot(centered.T, centered * weights[:, None]) / total_weight
-        cov += np.eye(2) * 1e-6   # ensure positive definiteness
+        cov += np.eye(2) * 1e-6
         return mean, cov
 
     def fit_gaussian_to_region(self, points: np.ndarray, colors: np.ndarray, weights: np.ndarray) -> Gaussian2D:
-        # Safety: if points are empty, return a tiny default Gaussian (should never be called with empty points)
         if len(points) == 0:
             return Gaussian2D(mean=np.array([0, 0]), cov=np.eye(2)*1e-6,
                               color=np.array([0.5, 0.5, 0.5]), opacity=1.0)
@@ -104,7 +102,7 @@ class RecursiveQuadtreeDensifyEncoder:
         refined = []
         for g in gaussians:
             if g is None:
-                continue   # safety skip
+                continue
             try:
                 eigvals, eigvecs = np.linalg.eigh(g.cov)
             except np.linalg.LinAlgError:
@@ -123,6 +121,99 @@ class RecursiveQuadtreeDensifyEncoder:
         return refined
 
     # ------------------------------------------------------------
+    # Gap‑filling and blurring (full implementations)
+    # ------------------------------------------------------------
+    def blur_gaussians_to_fill_gaps(self, gaussians: List[Gaussian2D], image: np.ndarray,
+                                     coverage_threshold: float = 0.5,
+                                     blur_factor: float = 1.2,
+                                     min_contribution_ratio: float = 0.1) -> List[Gaussian2D]:
+        h, w = image.shape[:2]
+        xs, ys = np.meshgrid(np.arange(w), np.arange(h))
+        coords = np.stack([xs, ys], axis=-1).astype(np.float32)
+
+        gaussian_alphas = []
+        alpha_acc = np.zeros((h, w), dtype=np.float32)
+
+        for g in gaussians:
+            delta = coords - g.mean
+            try:
+                inv_cov = np.linalg.inv(g.cov)
+            except np.linalg.LinAlgError:
+                inv_cov = np.linalg.pinv(g.cov)
+            exponent = np.einsum('...i,ij,...j->...', delta, inv_cov, delta)
+            density = np.exp(-0.5 * exponent)
+            alpha = g.opacity * density
+            alpha = np.clip(alpha, 0, 1)
+            gaussian_alphas.append(alpha.copy())
+            alpha_acc += (1.0 - alpha_acc) * alpha
+            alpha_acc = np.clip(alpha_acc, 0, 1)
+
+        low_mask = alpha_acc < coverage_threshold
+        if not np.any(low_mask):
+            return gaussians
+
+        new_gaussians = []
+        for g, g_alpha in zip(gaussians, gaussian_alphas):
+            total_contrib = g_alpha.sum()
+            low_contrib = g_alpha[low_mask].sum()
+            if total_contrib > 0 and (low_contrib / total_contrib) >= min_contribution_ratio:
+                new_cov = g.cov * blur_factor
+                new_cov += np.eye(2) * 1e-6
+                new_g = Gaussian2D(mean=g.mean.copy(), cov=new_cov,
+                                   color=g.color.copy(), opacity=g.opacity)
+            else:
+                new_g = g
+            new_gaussians.append(new_g)
+        return new_gaussians
+
+    def fill_gaps(self, gaussians: List[Gaussian2D], image: np.ndarray,
+                  coverage_threshold: float = 0.5, num_fill_points: int = 500,
+                  importance_map: Optional[np.ndarray] = None) -> List[Gaussian2D]:
+        h, w = image.shape[:2]
+        xs, ys = np.meshgrid(np.arange(w), np.arange(h))
+        coords = np.stack([xs, ys], axis=-1).astype(np.float32)
+
+        alpha_acc = np.zeros((h, w), dtype=np.float32)
+        for g in gaussians:
+            delta = coords - g.mean
+            try:
+                inv_cov = np.linalg.inv(g.cov)
+            except np.linalg.LinAlgError:
+                inv_cov = np.linalg.pinv(g.cov)
+            exponent = np.einsum('...i,ij,...j->...', delta, inv_cov, delta)
+            density = np.exp(-0.5 * exponent)
+            alpha = g.opacity * density
+            alpha = np.clip(alpha, 0, 1)
+            alpha_acc += (1.0 - alpha_acc) * alpha
+            alpha_acc = np.clip(alpha_acc, 0, 1)
+
+        low_coverage_mask = alpha_acc < coverage_threshold
+        y_idxs, x_idxs = np.where(low_coverage_mask)
+        if len(x_idxs) == 0:
+            return gaussians
+
+        num_samples = min(num_fill_points, len(x_idxs))
+        if importance_map is not None:
+            imp_values = importance_map[low_coverage_mask]
+            imp_values = imp_values + 1e-6
+            probs = imp_values / imp_values.sum()
+            sample_indices = np.random.choice(len(x_idxs), size=num_samples, replace=False, p=probs)
+        else:
+            sample_indices = np.random.choice(len(x_idxs), size=num_samples, replace=False)
+
+        fill_points = np.stack([x_idxs[sample_indices], y_idxs[sample_indices]], axis=1).astype(np.float32)
+
+        new_gaussians = []
+        for pt in fill_points:
+            mean = pt
+            cov = np.eye(2) * 1.0
+            color = image[int(pt[1]), int(pt[0])]
+            new_g = Gaussian2D(mean=mean, cov=cov, color=color, opacity=1.0)
+            new_gaussians.append(new_g)
+
+        return gaussians + new_gaussians
+
+    # ------------------------------------------------------------
     # Quadtree builder (records leaf cells)
     # ------------------------------------------------------------
     def build_quadtree(self, image: np.ndarray, edge_map: np.ndarray,
@@ -135,7 +226,6 @@ class RecursiveQuadtreeDensifyEncoder:
         cols_in = colors[mask]
         w_in = weights[mask]
 
-        # Leaf conditions
         if len(pts_in) <= self.config.max_points_per_leaf or \
            (xmax - xmin <= self.config.min_bbox_size and ymax - ymin <= self.config.min_bbox_size):
             if len(pts_in) > 0:
@@ -144,7 +234,6 @@ class RecursiveQuadtreeDensifyEncoder:
                 return self.split_large_gaussians([g])
             return []
 
-        # Color variance check
         if len(pts_in) > 0:
             color_var = np.var(cols_in, axis=0).mean()
             if color_var < self.config.var_threshold:
@@ -152,7 +241,6 @@ class RecursiveQuadtreeDensifyEncoder:
                 self.leaf_cells.append((bbox, g))
                 return self.split_large_gaussians([g])
 
-        # Subdivide
         xmid = (xmin + xmax) // 2
         ymid = (ymin + ymax) // 2
         gaussians = []
@@ -164,20 +252,6 @@ class RecursiveQuadtreeDensifyEncoder:
                                              (xmin, xmid, ymid, ymax)))
         gaussians.extend(self.build_quadtree(image, edge_map, points, colors, weights,
                                              (xmid, xmax, ymid, ymax)))
-        return gaussians
-
-    # ------------------------------------------------------------
-    # Gap‑filling and blurring (simplified placeholders – adapt as needed)
-    # ------------------------------------------------------------
-    def blur_gaussians_to_fill_gaps(self, gaussians, image, coverage_threshold,
-                                     blur_factor, min_contribution_ratio):
-        # Full implementation from the original question would go here.
-        # For now, we return the list unchanged to keep the example runnable.
-        return gaussians
-
-    def fill_gaps(self, gaussians, image, coverage_threshold, num_fill_points, importance_map=None):
-        # Full implementation from the original question would go here.
-        # For now, we return the list unchanged.
         return gaussians
 
     # ------------------------------------------------------------
@@ -197,7 +271,6 @@ class RecursiveQuadtreeDensifyEncoder:
                 inv_cov = np.linalg.inv(g.cov)
             except np.linalg.LinAlgError:
                 inv_cov = np.linalg.pinv(g.cov)
-
             exponent = np.einsum('...i,ij,...j->...', delta, inv_cov, delta)
             density = np.exp(-0.5 * exponent)
             alpha = g.opacity * density
@@ -228,10 +301,9 @@ class RecursiveQuadtreeDensifyEncoder:
         weights = edges[points_int[:, 1], points_int[:, 0]]
 
         bbox = (0, w, 0, h)
-        self.leaf_cells = []  # reset
+        self.leaf_cells = []
         gaussians = self.build_quadtree(img, edges, points, colors, weights, bbox)
 
-        # Optional post‑processing (placeholders)
         gaussians = self.blur_gaussians_to_fill_gaps(gaussians, img,
                                      self.config.blur_coverage_threshold,
                                      self.config.blur_factor,
@@ -256,22 +328,15 @@ class RecursiveQuadtreeDensifyEncoder:
 
 
 # ----------------------------------------------------------------------
-# Separate Visualizer Class
+# Visualizer (with updated plot_gaussians that supports outlines only)
 # ----------------------------------------------------------------------
 class RecursiveQuadtreeVisualizer:
-    """
-    Visualizer for the recursive quadtree densification algorithm.
-    Runs the pipeline once and stores intermediate data for plotting.
-    """
     def __init__(self, image_path: str, config: RecursiveDensifyConfig):
         self.config = config
         self.encoder = RecursiveQuadtreeDensifyEncoder(image_path, config)
-        # Run the pipeline to populate encoder.gaussians, encoder.leaf_cells, etc.
         self.gaussians, self.rendered = self.encoder.run_pipeline()
-        # Load original image (already resized)
         self.image = self.encoder.load_image(image_path, config.target_size)
         self.h, self.w = self.image.shape[:2]
-        # Extract initial samples and edge map
         _, self.edges = self.encoder.to_grayscale_with_edges(self.image)
         self.initial_points = self.encoder.select_important_points(
             self.edges, config.num_initial_points
@@ -281,12 +346,10 @@ class RecursiveQuadtreeVisualizer:
     # Plotting helpers
     # ------------------------------------------------------------------
     def plot_initial_samples(self, ax, color='red', s=1, alpha=0.5):
-        """Scatter plot of the initial Sobel‑sampled points."""
         ax.scatter(self.initial_points[:, 0], self.initial_points[:, 1],
                    c=color, s=s, alpha=alpha, label='Initial samples')
 
     def plot_quadtree_cells(self, ax, edgecolor='blue', linewidth=1, alpha=0.3):
-        """Draw rectangles for each quadtree leaf cell."""
         for (xmin, xmax, ymin, ymax), _ in self.encoder.leaf_cells:
             rect = Rectangle((xmin, ymin), xmax - xmin, ymax - ymin,
                              linewidth=linewidth, edgecolor=edgecolor,
@@ -294,16 +357,19 @@ class RecursiveQuadtreeVisualizer:
             ax.add_patch(rect)
 
     def plot_gaussians(self, ax, which='final',
-                       facecolor_from_color=True,  # only used if fill=True
-                       fill=True,                   # new: whether to fill the ellipse
-                       edgecolor='black',            # outline colour (default black)
+                       facecolor_from_color=True,
+                       fill=True,
+                       edgecolor='black',
                        alpha=0.6):
         """
         Plot Gaussians as ellipses.
+
+        Parameters
+        ----------
         which : 'leaf' or 'final'
         facecolor_from_color : if fill=True, use Gaussian colour when True, else 'gray'
         fill : if False, ellipse is not filled (only edge drawn)
-        edgecolor : colour of the ellipse edge (used when fill=False or to override edge)
+        edgecolor : colour of the ellipse edge
         alpha : transparency of fill and edge
         """
         if which == 'leaf':
@@ -312,19 +378,17 @@ class RecursiveQuadtreeVisualizer:
             gaussians = self.gaussians
         else:
             raise ValueError("which must be 'leaf' or 'final'")
-    
+
         for g in gaussians:
             if g is None:
                 continue
             width, height, angle = self._cov_to_ellipse_params(g.cov)
-    
+
             if fill:
-                # Filled ellipse: colour from Gaussian or gray
                 facecolor = g.color if facecolor_from_color else 'gray'
             else:
-                # No fill, only edge
                 facecolor = 'none'
-    
+
             ellipse = Ellipse(xy=(g.mean[0], g.mean[1]),
                               width=width, height=height, angle=angle,
                               facecolor=facecolor,
@@ -333,7 +397,6 @@ class RecursiveQuadtreeVisualizer:
             ax.add_patch(ellipse)
 
     def _cov_to_ellipse_params(self, cov):
-        """Convert 2x2 covariance to ellipse width, height, angle (degrees)."""
         try:
             eigvals, eigvecs = np.linalg.eigh(cov)
         except np.linalg.LinAlgError:
@@ -348,11 +411,9 @@ class RecursiveQuadtreeVisualizer:
         return width, height, angle
 
     def plot_rendered(self, ax):
-        """Show the final rendered image."""
         ax.imshow(self.rendered)
 
     def plot_original(self, ax):
-        """Show the original image."""
         ax.imshow(self.image)
 
     # ------------------------------------------------------------------
@@ -361,12 +422,19 @@ class RecursiveQuadtreeVisualizer:
     def create_figure(self, rows=2, cols=3, figsize=(15, 10),
                       show_original=True, show_initial=True,
                       show_quad=True, show_leaf_gaussians=False,
-                      show_final_gaussians=True, show_rendered=True):
+                      show_final_gaussians=True, show_rendered=True,
+                      # New parameters to control ellipse style
+                      ellipse_fill=True,
+                      ellipse_edgecolor='white',
+                      ellipse_alpha=0.6):
         """
         Create a figure with selected subplots.
-        Returns the figure and a list of axes.
+
+        Additional parameters:
+        ellipse_fill : bool, whether to fill the Gaussian ellipses
+        ellipse_edgecolor : colour of ellipse edges (when fill=False or to outline)
+        ellipse_alpha : transparency of ellipses
         """
-        # Determine which panels to show
         panels = []
         if show_original:
             panels.append('original')
@@ -385,24 +453,21 @@ class RecursiveQuadtreeVisualizer:
         if n == 0:
             raise ValueError("No panels selected")
 
-        # Create grid and flatten axes
         fig, axes = plt.subplots(rows, cols, figsize=figsize)
         if rows == 1 and cols == 1:
             axes = np.array([axes])
         axes = axes.flatten()
 
-        # Hide unused axes
         for i in range(n, len(axes)):
             axes[i].axis('off')
 
-        # Plot each panel
         for i, name in enumerate(panels):
             ax = axes[i]
             if name == 'original':
                 self.plot_original(ax)
                 ax.set_title('Original Image')
             elif name == 'initial':
-                self.plot_original(ax)      # background
+                self.plot_original(ax)
                 self.plot_initial_samples(ax)
                 ax.set_title('Initial Samples (Sobel)')
             elif name == 'quad':
@@ -411,17 +476,22 @@ class RecursiveQuadtreeVisualizer:
                 ax.set_title('Quadtree Leaf Cells')
             elif name == 'leaf_gauss':
                 self.plot_original(ax)
-                self.plot_gaussians(ax, which='leaf')
+                self.plot_gaussians(ax, which='leaf',
+                                    fill=ellipse_fill,
+                                    edgecolor=ellipse_edgecolor,
+                                    alpha=ellipse_alpha)
                 ax.set_title('Leaf Gaussians')
             elif name == 'final_gauss':
                 self.plot_original(ax)
-                self.plot_gaussians(ax, which='final')
+                self.plot_gaussians(ax, which='final',
+                                    fill=ellipse_fill,
+                                    edgecolor=ellipse_edgecolor,
+                                    alpha=ellipse_alpha)
                 ax.set_title('Final Gaussians')
             elif name == 'rendered':
                 self.plot_rendered(ax)
                 ax.set_title('Rendered Image')
 
-            # Set common limits and aspect
             ax.set_xlim(0, self.w)
             ax.set_ylim(self.h, 0)
             ax.set_aspect('equal')
@@ -430,7 +500,6 @@ class RecursiveQuadtreeVisualizer:
         return fig, axes
 
     def show(self, **kwargs):
-        """Create and display the figure with the given keyword arguments."""
         fig, _ = self.create_figure(**kwargs)
         plt.show()
 
