@@ -101,3 +101,90 @@ def write_gaussians_to_ply(gaussians, output_path, verify=True):
             print(f"Verification: PLY header shows {ply_read['vertex'].count} vertices.")
         except Exception as e:
             print(f"Verification failed: {e}")
+
+
+import numpy as np
+from plyfile import PlyData
+import os
+
+class Gaussian3D:
+    """Simple container for a 3D Gaussian."""
+    def __init__(self, mean, cov, color, opacity):
+        self.mean = mean      # (3,) numpy array
+        self.cov = cov        # (3,3) numpy array
+        self.color = color    # (3,) numpy array in [0,1]
+        self.opacity = opacity # float in [0,1]
+
+def load_ply_to_gaussians(ply_path):
+    """
+    Load a PLY file (binary little‑endian) exported by the official
+    3D Gaussian Splatting code and return a list of Gaussian3D objects.
+
+    The PLY must contain the following properties per vertex:
+        x, y, z                     (position)
+        nx, ny, nz                   (normals, ignored)
+        f_dc_0, f_dc_1, f_dc_2       (SH DC coefficients)
+        f_rest_0 ... f_rest_44        (higher SH coefficients, ignored here)
+        opacity                       (logit of opacity)
+        scale_0, scale_1, scale_2     (logarithm of scales)
+        rot_0, rot_1, rot_2, rot_3    (rotation quaternion in w,x,y,z order)
+    """
+    plydata = PlyData.read(ply_path)
+    vertex = plydata['vertex']
+
+    num_vertices = len(vertex)
+    gaussians = []
+
+    # Pre‑compute constants
+    FACTOR = 2.0 * np.sqrt(np.pi)          # used for SH DC → RGB conversion
+
+    for i in range(num_vertices):
+        # ---- Position ----
+        mean = np.array([vertex['x'][i], vertex['y'][i], vertex['z'][i]], dtype=np.float64)
+
+        # ---- SH DC → RGB ----
+        f_dc = np.array([vertex['f_dc_0'][i], vertex['f_dc_1'][i], vertex['f_dc_2'][i]], dtype=np.float32)
+        rgb = (f_dc / FACTOR) + 0.5
+        rgb = np.clip(rgb, 0.0, 1.0)        # ensure valid range
+
+        # ---- Opacity (logit → probability) ----
+        logit = vertex['opacity'][i]
+        opacity = 1.0 / (1.0 + np.exp(-logit))
+
+        # ---- Scales (log → linear) ----
+        log_scales = np.array([vertex['scale_0'][i], vertex['scale_1'][i], vertex['scale_2'][i]], dtype=np.float64)
+        scales = np.exp(log_scales)
+
+        # ---- Rotation quaternion (w, x, y, z → rotation matrix) ----
+        qw = vertex['rot_0'][i]
+        qx = vertex['rot_1'][i]
+        qy = vertex['rot_2'][i]
+        qz = vertex['rot_3'][i]
+
+        # Normalize quaternion to avoid numerical issues
+        norm = np.sqrt(qw*qw + qx*qx + qy*qy + qz*qz)
+        if norm < 1e-12:
+            # Degenerate quaternion – use identity
+            R = np.eye(3)
+        else:
+            qw /= norm
+            qx /= norm
+            qy /= norm
+            qz /= norm
+
+            # Rotation matrix from quaternion (w, x, y, z)
+            R = np.array([
+                [1 - 2*(qy*qy + qz*qz),   2*(qx*qy - qz*qw),     2*(qx*qz + qy*qw)],
+                [2*(qx*qy + qz*qw),       1 - 2*(qx*qx + qz*qz), 2*(qy*qz - qx*qw)],
+                [2*(qx*qz - qy*qw),       2*(qy*qz + qx*qw),     1 - 2*(qx*qx + qy*qy)]
+            ])
+
+        # ---- Covariance matrix: R @ diag(scales**2) @ R.T ----
+        S = np.diag(scales ** 2)
+        cov = R @ S @ R.T
+
+        # ---- Create Gaussian3D object ----
+        gaussians.append(Gaussian3D(mean, cov, rgb, opacity))
+
+    return gaussians
+
