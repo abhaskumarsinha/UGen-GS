@@ -230,7 +230,7 @@ class GaussianRasterizerDecoder(BaseRasterizer):
                 colors_precomp=None,
                 opacities=opacities,
                 scales=scales,
-                rotations=rotations,
+                rotations=gaussian["quat"].to(torch.float32),
                 cov3D_precomp=None,
             )
         except Exception as e:
